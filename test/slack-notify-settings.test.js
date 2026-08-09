@@ -24,6 +24,7 @@ test("normalizeSlackNotify fills defaults and coerces types", () => {
   assert.deepEqual(settings.normalizeSlackNotify(undefined), {
     enabled: false,
     channelId: "",
+    mentionUserId: "",
     notifyOnDone: true,
     notifyOnError: true,
     notifyOnPermission: true,
@@ -37,6 +38,7 @@ test("normalizeSlackNotify fills defaults and coerces types", () => {
   }), {
     enabled: true,
     channelId: "C123",
+    mentionUserId: "",
     notifyOnDone: false,
     notifyOnError: true,
     notifyOnPermission: true,
@@ -163,6 +165,59 @@ test("readSecretsEnvFile degrades gracefully when the file is missing", () => {
   const filePath = settings.defaultSecretsEnvFilePath(dir); // never written
   assert.deepEqual(settings.readSecretsEnvFile({ fs, filePath }), { webhookUrl: "", botToken: "" });
   assert.equal(settings.readMaskedSecrets({ fs, filePath }).configured, false);
+});
+
+test("member id validation is a strict allowlist, not a sanitiser", () => {
+  // Clawd emits this id as <@ID> WITHOUT escaping — that is the only way a
+  // mention notifies anyone. The escape hatch is therefore the validator: if a
+  // hostile value could pass, it would smuggle mention syntax straight past
+  // every other defence in the formatter.
+  assert.ok(settings.isValidSlackMemberId("U01234567"));
+  assert.ok(settings.isValidSlackMemberId("W012ABC3DEF"), "Enterprise Grid ids start with W");
+  assert.ok(settings.isValidSlackMemberId("  U01234567  "), "surrounding space is trimmed");
+
+  for (const hostile of [
+    "!channel",
+    "U123>ping<!channel",
+    "<@U01234567>",
+    "U01234567|evil",
+    "u01234567",       // must be upper-case
+    "U123",            // too short
+    "B01234567",       // bot id, not a member
+    "",
+    null,
+    undefined,
+    123,
+  ]) {
+    assert.equal(settings.isValidSlackMemberId(hostile), false, JSON.stringify(hostile));
+  }
+});
+
+test("mentionUserId round-trips through config normalisation", () => {
+  assert.equal(settings.normalizeSlackNotify({ mentionUserId: "U01234567" }).mentionUserId, "U01234567");
+  // An invalid id is dropped rather than stored — nothing downstream should
+  // have to re-check it.
+  assert.equal(settings.normalizeSlackNotify({ mentionUserId: "<!channel>" }).mentionUserId, "");
+  assert.equal(settings.validateSlackNotify({ enabled: true, mentionUserId: "U01234567" }).status, "ok");
+  assert.equal(settings.validateSlackNotify({ enabled: true, mentionUserId: "<!channel>" }).status, "error");
+});
+
+test("webhook host pinning rejects suffix-confusion lookalikes", () => {
+  // Exact hostname equality is the whole defence here — a substring or endsWith
+  // check would accept every one of these.
+  const hostile = [
+    "https://evil-slack.com/services/T/B/x",
+    "https://hooks.slack.com.evil.com/services/T/B/x",
+    "https://hooks-slack.com/services/T/B/x",
+    "https://evil.com/hooks.slack.com/services/T/B/x",
+    "https://hooks.slack.com.br/services/T/B/x",
+    "https://nothooks.slack.com/services/T/B/x",
+    "http://hooks.slack.com/services/T/B/x", // downgraded to plaintext
+  ];
+  for (const url of hostile) {
+    assert.equal(settings.isValidWebhookUrl(url), false, url);
+  }
+  assert.equal(settings.isValidWebhookUrl("https://hooks.slack.com/services/T/B/x"), true);
 });
 
 test("redactionSecretsForSlackNotify lists non-empty secrets", () => {

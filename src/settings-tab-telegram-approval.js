@@ -1889,6 +1889,7 @@
     return {
       enabled: !!(cfg && cfg.enabled),
       channelId: cfg && typeof cfg.channelId === "string" ? cfg.channelId : "",
+      mentionUserId: cfg && typeof cfg.mentionUserId === "string" ? cfg.mentionUserId : "",
       notifyOnDone: !cfg || cfg.notifyOnDone !== false,
       notifyOnError: !cfg || cfg.notifyOnError !== false,
       notifyOnPermission: !cfg || cfg.notifyOnPermission !== false,
@@ -2190,9 +2191,58 @@
       saveSlackConfig({ ...currentSlackConfig(), notifyOnPermission: value })));
     rows.push(buildSlackSwitchRow("slackNotifyOutputMode", "slackNotifyOutputModeDesc", currentSlackConfig().outputMode === "full", (value) =>
       saveSlackConfig({ ...currentSlackConfig(), outputMode: value ? "full" : "off" })));
+    rows.push(buildSlackMentionRow());
     return helpers.buildSection(t("slackNotifyStep3Title"), rows);
   }
 
+  // Optional @-mention target. Validated in the main process too — this check
+  // only spares the user a round trip and a red toast.
+  function buildSlackMentionRow() {
+    const cfg = currentSlackConfig();
+    const row = document.createElement("div");
+    row.className = "row tg-approval-recipient-row slack-notify-mention-row";
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("slackNotifyMentionLabel");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("slackNotifyMentionHint");
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control tg-approval-input-row";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = t("slackNotifyMentionPlaceholder");
+    input.className = "tg-approval-input";
+    input.value = cfg.mentionUserId || "";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "soft-btn accent";
+    saveBtn.textContent = slackView.configPending ? t("slackNotifySaving") : t("slackNotifySaveMention");
+    saveBtn.disabled = slackView.configPending;
+    saveBtn.addEventListener("click", () => {
+      const value = input.value.trim();
+      if (value && !/^[UW][A-Z0-9]{6,20}$/.test(value)) {
+        ops.showToast(t("slackNotifyMentionInvalid"), { error: true });
+        return;
+      }
+      saveSlackConfig({ ...currentSlackConfig(), mentionUserId: value });
+    });
+
+    ctrl.appendChild(input);
+    ctrl.appendChild(saveBtn);
+    row.appendChild(ctrl);
+    return row;
+  }
 
   function buildSlackPrerequisitesRow() {
     const row = document.createElement("div");

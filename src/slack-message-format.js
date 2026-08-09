@@ -170,6 +170,23 @@ function redactMrkdwn(value) {
   return escapeMrkdwn(redactSecrets(safeText(value)));
 }
 
+// The single deliberate exception to "escape everything before it leaves the
+// desktop". An escaped mention is inert text that notifies nobody, so this must
+// go out raw — which is safe only because the id is validated against a strict
+// allowlist (slack-notify-settings.isValidSlackMemberId) before it is stored.
+// Re-checked here so a bad value can never become mention syntax, even if it
+// somehow reached the formatter unvalidated.
+function mentionLine(options) {
+  const id = options && typeof options.mentionUserId === "string" ? options.mentionUserId.trim() : "";
+  return /^[UW][A-Z0-9]{6,20}$/.test(id) ? `<@${id}>` : "";
+}
+
+function withMention(text, options) {
+  const mention = mentionLine(options);
+  if (!mention) return text;
+  return text ? `${mention}\n${text}` : mention;
+}
+
 function clip(value, maxLength) {
   const text = safeText(value);
   if (maxLength <= 0) return "";
@@ -281,7 +298,7 @@ function buildCompletionMessage(entry, options = {}) {
   const blocks = [headerBlock(`${icon} ${redactPlain(rawTitle)}`)];
   const meta = metaLine(entry);
   const statusLine = `*${escapeMrkdwn(status)}*${meta ? `  ·  ${meta}` : ""}`;
-  blocks.push(sectionBlock(statusLine));
+  blocks.push(sectionBlock(withMention(statusLine, options)));
 
   const prepared = options.includeOutput ? prepareAssistantOutput(entry) : null;
   if (prepared) {
@@ -324,7 +341,8 @@ function buildPermissionMessage(payload, options = {}) {
   // itself. Fall back to the title when the agent sent no description.
   const detail = safeText(p.detail || p.summary).trim();
   const body = detail || safeText(p.title).trim();
-  if (body) blocks.push(sectionBlock(clipMrkdwn(redactMrkdwn(body), SECTION_MAX)));
+  const bodyText = withMention(body ? clipMrkdwn(redactMrkdwn(body), SECTION_MAX) : "", options);
+  if (bodyText) blocks.push(sectionBlock(bodyText));
 
   // Folder is orientation, not the decision — it belongs beside the hint rather
   // than in the body.
@@ -349,7 +367,10 @@ function buildTestMessage(options = {}) {
     text: locale.testTitle,
     attachments: [{
       color: FRAME.info,
-      blocks: [headerBlock(`🦀 ${locale.testTitle}`), sectionBlock(escapeMrkdwn(locale.testBody))],
+      blocks: [
+        headerBlock(`🦀 ${locale.testTitle}`),
+        sectionBlock(withMention(escapeMrkdwn(locale.testBody), options)),
+      ],
     }],
   };
 }

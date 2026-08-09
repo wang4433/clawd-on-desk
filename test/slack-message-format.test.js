@@ -6,7 +6,7 @@ const test = require("node:test");
 const fmt = require("../src/slack-message-format");
 
 // Blocks live inside the framing attachment (see "messages are framed" below).
-const blocksOf = (msg) => (msg.attachments ? msg.attachments[0].blocks : msg.blocks);
+const blocksOf = (msg) => (msg.attachments ? msg.attachments[0].blocks : blocksOf(msg));
 
 test("buildCompletionMessage renders a done card with fallback text", () => {
   const msg = fmt.buildCompletionMessage(
@@ -52,7 +52,7 @@ test("assistant output cannot smuggle a broadcast out of the code fence", () => 
     { id: "s1", badge: "done", displayTitle: "T", assistantLastOutput: "ping <!channel> and <@U123>" },
     { lang: "en", includeOutput: true },
   );
-  const joined = msg.blocks.map((b) => (b.text ? b.text.text : "")).join("\n");
+  const joined = blocksOf(msg).map((b) => (b.text ? b.text.text : "")).join("\n");
   assert.ok(!joined.includes("<!channel>"));
   assert.ok(!joined.includes("<@U123>"));
   assert.ok(joined.includes("&lt;!channel&gt;"));
@@ -103,7 +103,7 @@ test("the session title is redacted in the header and escaped in the fallback te
     { lang: "en" },
   );
   // Header: plain_text, so the secret is gone but nothing is HTML-escaped.
-  const header = msg.blocks[0].text.text;
+  const header = blocksOf(msg)[0].text.text;
   assert.ok(!header.includes("xoxb-123456789-abcdefghij"));
   assert.ok(header.includes("<redacted:token>"));
   // Fallback text: mrkdwn-parsed, so the secret is gone AND <!channel> is inert.
@@ -124,7 +124,7 @@ test("session metadata (folder, host, agent) is redacted and escaped", () => {
     },
     { lang: "en" },
   );
-  const section = msg.blocks[1].text.text;
+  const section = blocksOf(msg)[1].text.text;
   assert.ok(!section.includes("xoxb-123456789-abcdefghij"));
   assert.ok(!section.includes("<!here>"));
   assert.ok(section.includes("&lt;!here&gt;"));
@@ -151,19 +151,35 @@ test("permission announcements redact and escape every agent-derived field", () 
     },
     { lang: "en" },
   );
-  const joined = [msg.text, ...msg.blocks.map((b) => {
-    if (b.text) return b.text.text;
-    if (b.elements) return b.elements.map((e) => e.text).join(" ");
-    return "";
-  })].join("\n");
-  assert.ok(!joined.includes("xoxb-123456789-abcdefghij"));
-  assert.ok(!joined.includes("sk-ant-abcdefghijkl"));
-  assert.ok(!joined.includes("<!channel>"));
-  assert.ok(!joined.includes("<!here>"));
-  assert.ok(!joined.includes("<@U123>"));
-  // ...including the top-level fallback, which Slack renders as mrkdwn.
-  assert.ok(!msg.text.includes("<!channel>"));
-  assert.ok(msg.text.includes("&lt;!channel&gt;"));
+  const blocks = blocksOf(msg);
+  const textOf = (b) => (b.text ? b.text.text : (b.elements || []).map((e) => e.text).join(" "));
+  const everywhere = [msg.text, ...blocks.map(textOf)].join("\n");
+
+  // Secrets must be gone from every field regardless of block type.
+  assert.ok(!everywhere.includes("xoxb-123456789-abcdefghij"));
+  assert.ok(!everywhere.includes("sk-ant-abcdefghijkl"));
+
+  // Mention syntax is neutralised by escaping, which only applies where Slack
+  // parses mrkdwn: section and context blocks, and the top-level fallback text.
+  const mrkdwn = [msg.text, ...blocks.filter((b) => b.type !== "header").map(textOf)].join("\n");
+  assert.ok(!mrkdwn.includes("<!channel>"));
+  assert.ok(!mrkdwn.includes("<!here>"));
+  assert.ok(!mrkdwn.includes("<@U123>"));
+  // The title now lands in the body rather than the fallback (the fallback
+  // carries agent · tool so push previews stay distinguishable), so look for the
+  // escaped form wherever mrkdwn is rendered.
+  // The agent-supplied description supersedes the title in the body (the header
+  // already says who wants what), so this title is dropped rather than shown —
+  // either way none of its control sequences reach a parsed field.
+  assert.ok(mrkdwn.includes("&lt;!here&gt;"), "the folder is still shown, escaped");
+
+  // The header is plain_text, where Slack renders control sequences literally
+  // (verified against a real workspace — see the header test above). It is
+  // redacted but deliberately not escaped, so a tool name may still read
+  // "Bash <@U123>" there. That is inert text, not a mention.
+  const header = blocks[0].text.text;
+  assert.equal(blocks[0].text.type, "plain_text");
+  assert.ok(!header.includes("xoxb-123456789-abcdefghij"), "redaction still applies to the header");
 });
 
 // A cut that lands inside "&lt;" would render as literal "&l" rubbish, and the
@@ -180,7 +196,7 @@ test("truncation never leaves a half-written escape entity", () => {
     },
     { lang: "en", includeOutput: true },
   );
-  for (const block of msg.blocks) {
+  for (const block of blocksOf(msg)) {
     const text = block.text ? block.text.text : "";
     assert.ok(!/&[A-Za-z]{0,4}$/.test(text), `dangling entity in: ${text.slice(-12)}`);
   }
@@ -232,6 +248,35 @@ test("the frame colour reflects what happened", () => {
 
   assert.notEqual(colourOf(done), colourOf(bad), "success and failure must not look alike");
   assert.notEqual(colourOf(done), colourOf(perm), "a request for you is not a completion");
+});
+
+test("an opt-in mention is emitted unescaped so it actually notifies", () => {
+  // The one deliberate exception to "escape everything": this id is Clawd's own
+  // output, validated on the way in, never agent data.
+  const opts = { lang: "en", mentionUserId: "U01234567" };
+  for (const msg of [
+    fmt.buildCompletionMessage({ id: "s1", badge: "done", displayTitle: "T" }, opts),
+    fmt.buildPermissionMessage({ toolName: "Bash", agentId: "claude-code" }, opts),
+    fmt.buildTestMessage(opts),
+  ]) {
+    const wire = JSON.stringify(msg);
+    assert.ok(wire.includes("<@U01234567>"), "mention must reach Slack unescaped");
+    assert.ok(!wire.includes("&lt;@U01234567&gt;"), "escaping it would show text and notify nobody");
+  }
+});
+
+test("no mention is emitted when none is configured, or when it is malformed", () => {
+  const plain = fmt.buildPermissionMessage({ toolName: "Bash" }, { lang: "en" });
+  assert.ok(!JSON.stringify(plain).includes("<@"), "default must stay silent");
+
+  // Defence in depth: even if a bad value reached the formatter, it must not
+  // become mention syntax.
+  for (const bad of ["<!channel>", "u01234567", "U1", "", null]) {
+    const msg = fmt.buildPermissionMessage({ toolName: "Bash" }, { lang: "en", mentionUserId: bad });
+    const wire = JSON.stringify(msg);
+    assert.ok(!wire.includes("<@"), `built a mention from ${JSON.stringify(bad)}`);
+    assert.ok(!wire.includes("<!channel>"), `leaked mention syntax from ${JSON.stringify(bad)}`);
+  }
 });
 
 test("permission headers distinguish one request from another at a glance", () => {

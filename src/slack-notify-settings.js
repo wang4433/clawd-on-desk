@@ -11,6 +11,10 @@ const path = require("path");
 const DEFAULT_SLACK_NOTIFY = Object.freeze({
   enabled: false,
   channelId: "",
+  // Optional Slack member id. When set, Clawd @-mentions it on every message so
+  // the notification actually reaches you in a channel you are not watching.
+  // Empty means no mention.
+  mentionUserId: "",
   notifyOnDone: true,
   notifyOnError: true,
   notifyOnPermission: true,
@@ -51,6 +55,7 @@ function normalizeSlackNotify(value, defaultsValue = DEFAULT_SLACK_NOTIFY) {
   const out = {
     enabled: defaults.enabled === true,
     channelId: trimString(defaults.channelId, 128),
+    mentionUserId: isValidSlackMemberId(defaults.mentionUserId) ? trimString(defaults.mentionUserId, 32) : "",
     notifyOnDone: defaults.notifyOnDone !== false,
     notifyOnError: defaults.notifyOnError !== false,
     notifyOnPermission: defaults.notifyOnPermission !== false,
@@ -59,6 +64,11 @@ function normalizeSlackNotify(value, defaultsValue = DEFAULT_SLACK_NOTIFY) {
   if (!isPlainObject(value)) return out;
   if (typeof value.enabled === "boolean") out.enabled = value.enabled;
   if (typeof value.channelId === "string") out.channelId = trimString(value.channelId, 128);
+  // Store only ids that pass the allowlist, so nothing downstream has to
+  // re-validate before emitting <@id> unescaped.
+  if (typeof value.mentionUserId === "string") {
+    out.mentionUserId = isValidSlackMemberId(value.mentionUserId) ? trimString(value.mentionUserId, 32) : "";
+  }
   if (typeof value.notifyOnDone === "boolean") out.notifyOnDone = value.notifyOnDone;
   if (typeof value.notifyOnError === "boolean") out.notifyOnError = value.notifyOnError;
   if (typeof value.notifyOnPermission === "boolean") out.notifyOnPermission = value.notifyOnPermission;
@@ -69,6 +79,7 @@ function normalizeSlackNotify(value, defaultsValue = DEFAULT_SLACK_NOTIFY) {
 const ALLOWED_KEYS = new Set([
   "enabled",
   "channelId",
+  "mentionUserId",
   "notifyOnDone",
   "notifyOnError",
   "notifyOnPermission",
@@ -88,6 +99,14 @@ function validateSlackNotify(value) {
   }
   if (typeof value.channelId === "string" && value.channelId.length > 128) {
     return { status: "error", message: "slackNotify.channelId is too long" };
+  }
+  if (value.mentionUserId !== undefined) {
+    if (typeof value.mentionUserId !== "string") {
+      return { status: "error", message: "slackNotify.mentionUserId must be a string" };
+    }
+    if (value.mentionUserId.trim() && !isValidSlackMemberId(value.mentionUserId)) {
+      return { status: "error", message: "slackNotify.mentionUserId must be a Slack member id such as U01234567" };
+    }
   }
   for (const key of ["notifyOnDone", "notifyOnError", "notifyOnPermission"]) {
     if (value[key] !== undefined && typeof value[key] !== "boolean") {
@@ -133,6 +152,19 @@ function isValidBotToken(value) {
 
 // Which transport a config+secrets pair can actually use. Webhook wins when both
 // are present because it needs no channel id and no extra scopes.
+// Clawd emits this id as <@id> WITHOUT escaping — an escaped mention is inert
+// text and notifies nobody. That makes this validator the security boundary,
+// not a formatting nicety: it is the only thing standing between a stored value
+// and raw mention syntax in an outgoing message. Member ids are U… (user) or
+// W… (Enterprise Grid); bot ids (B…) cannot be mentioned this way.
+function isValidSlackMemberId(value) {
+  if (typeof value !== "string") return false;
+  return /^[UW][A-Z0-9]{6,20}$/.test(value.trim());
+}
+
+// Which transport a config+secrets pair can actually use. There is exactly one
+// in this phase; the function stays so a future bot/Socket Mode transport has an
+// obvious place to land.
 function resolveSlackTransport(config, secrets) {
   const normalized = normalizeSlackNotify(config);
   const source = isPlainObject(secrets) ? secrets : {};
@@ -306,6 +338,7 @@ module.exports = {
   validateSlackNotify,
   isValidWebhookUrl,
   isValidBotToken,
+  isValidSlackMemberId,
   resolveSlackTransport,
   defaultSecretsEnvFilePath,
   readSecretsEnvFile,

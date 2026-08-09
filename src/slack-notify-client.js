@@ -249,7 +249,7 @@ function createSlackNotifyClient({
     for (const entry of toSend) {
       let message = null;
       try {
-        message = buildCompletionMessage(entry, { lang, includeOutput });
+        message = buildCompletionMessage(entry, { lang, includeOutput, mentionUserId: config.mentionUserId });
       } catch (err) {
         safeLog("warn", "slack completion format threw", { id: entry.id, error: err && err.message });
         continue;
@@ -276,7 +276,7 @@ function createSlackNotifyClient({
     if (!isReady()) return Promise.resolve({ ok: false, errorClass: "not-configured" });
     let message = null;
     try {
-      message = buildPermissionMessage(payload, { lang: readLang() });
+      message = buildPermissionMessage(payload, { lang: readLang(), mentionUserId: config.mentionUserId });
     } catch (err) {
       safeLog("warn", "slack permission format threw", { error: err && err.message });
       return Promise.resolve({ ok: false, errorClass: "format-error" });
@@ -303,7 +303,10 @@ function createSlackNotifyClient({
     }
     let res;
     try {
-      res = await sendMessage(buildTestMessage({ lang: readLang() }));
+      res = await sendMessage(buildTestMessage({
+        lang: readLang(),
+        mentionUserId: readConfig().mentionUserId,
+      }));
     } catch (err) {
       return { status: "error", code: "threw", message: err && err.message };
     }
