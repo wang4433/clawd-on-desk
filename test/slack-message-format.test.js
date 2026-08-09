@@ -5,16 +5,19 @@ const test = require("node:test");
 
 const fmt = require("../src/slack-message-format");
 
+// Blocks live inside the framing attachment (see "messages are framed" below).
+const blocksOf = (msg) => (msg.attachments ? msg.attachments[0].blocks : msg.blocks);
+
 test("buildCompletionMessage renders a done card with fallback text", () => {
   const msg = fmt.buildCompletionMessage(
     { id: "abc123def", displayTitle: "Build", badge: "done", cwd: "/x/proj", agentId: "claude" },
     { lang: "en" },
   );
   assert.ok(msg.text.startsWith("✅"));
-  assert.equal(msg.blocks[0].type, "header");
-  assert.ok(msg.blocks[0].text.text.includes("Build"));
+  assert.equal(blocksOf(msg)[0].type, "header");
+  assert.ok(blocksOf(msg)[0].text.text.includes("Build"));
   // metadata line includes the folder + short id
-  const section = msg.blocks[1].text.text;
+  const section = blocksOf(msg)[1].text.text;
   assert.ok(section.includes("proj"));
   assert.ok(section.includes("#abc123"));
 });
@@ -34,7 +37,7 @@ test("includeOutput appends a fenced, redacted, fence-safe code block", () => {
     },
     { lang: "en", includeOutput: true },
   );
-  const joined = msg.blocks.map((b) => (b.text ? b.text.text : "")).join("\n");
+  const joined = blocksOf(msg).map((b) => (b.text ? b.text.text : "")).join("\n");
   assert.ok(joined.includes("```")); // a code block was added
   // Secret scrubbed. The marker itself is mrkdwn-escaped: Slack parses <…:…>
   // as link syntax even inside a fence, and renders &lt;…&gt; back as literal.
@@ -60,7 +63,7 @@ test("output is omitted when includeOutput is false", () => {
     { id: "s1", badge: "done", displayTitle: "T", assistantLastOutput: "hello" },
     { lang: "en", includeOutput: false },
   );
-  const joined = withOut.blocks.map((b) => (b.text ? b.text.text : "")).join("\n");
+  const joined = blocksOf(withOut).map((b) => (b.text ? b.text.text : "")).join("\n");
   assert.ok(!joined.includes("hello"));
 });
 
@@ -70,7 +73,7 @@ test("buildPermissionMessage announces and points at the desktop app", () => {
     { lang: "en" },
   );
   assert.ok(msg.text.startsWith("⏳"));
-  const joined = msg.blocks.map((b) => {
+  const joined = blocksOf(msg).map((b) => {
     if (b.text) return b.text.text;
     if (b.elements) return b.elements.map((e) => e.text).join(" ");
     return "";
@@ -81,7 +84,7 @@ test("buildPermissionMessage announces and points at the desktop app", () => {
 
 test("mrkdwn special characters are escaped", () => {
   const msg = fmt.buildCompletionMessage({ id: "s1", badge: "done", displayTitle: "a<b>&c" }, { lang: "en" });
-  const header = msg.blocks[0].text.text; // plain_text header is not escaped
+  const header = blocksOf(msg)[0].text.text; // plain_text header is not escaped
   assert.ok(header.includes("a<b>&c"));
   assert.equal(fmt.escapeMrkdwn("a<b>&c"), "a&lt;b&gt;&amp;c");
 });
@@ -196,15 +199,68 @@ test("truncateMiddle keeps both ends and marks truncation", () => {
 test("locales fall back to English and translate the status word", () => {
   assert.equal(fmt.getLocale("zz").done, "done");
   const zh = fmt.buildCompletionMessage({ id: "s1", badge: "done", displayTitle: "T" }, { lang: "zh" });
-  assert.ok(zh.blocks[1].text.text.includes("已完成"));
+  assert.ok(blocksOf(zh)[1].text.text.includes("已完成"));
 });
 
 test("buildTestMessage produces a simple two-block card", () => {
   const msg = fmt.buildTestMessage({ lang: "en" });
-  assert.equal(msg.blocks.length, 2);
-  assert.equal(msg.blocks[0].type, "header");
+  assert.equal(blocksOf(msg).length, 2);
+  assert.equal(blocksOf(msg)[0].type, "header");
 });
 
 test("null entry yields null (caller skips)", () => {
   assert.equal(fmt.buildCompletionMessage(null, { lang: "en" }), null);
+});
+
+// Slack draws no border around Block Kit blocks. The one way to frame a whole
+// message is an attachment with a `color` — it renders a vertical bar down the
+// left edge, which also separates consecutive messages from each other.
+test("messages are framed by a coloured attachment", () => {
+  const done = fmt.buildCompletionMessage({ id: "s1", badge: "done", displayTitle: "T" }, { lang: "en" });
+  assert.equal(done.blocks, undefined, "blocks move inside the attachment");
+  assert.equal(done.attachments.length, 1);
+  assert.ok(/^#[0-9a-f]{6}$/i.test(done.attachments[0].color), "needs a hex colour to draw the bar");
+  assert.ok(Array.isArray(done.attachments[0].blocks));
+  assert.ok(done.text, "the summary survives as the notification fallback");
+});
+
+test("the frame colour reflects what happened", () => {
+  const colourOf = (msg) => msg.attachments[0].color.toLowerCase();
+  const done = fmt.buildCompletionMessage({ id: "s1", badge: "done", displayTitle: "T" }, { lang: "en" });
+  const bad = fmt.buildCompletionMessage({ id: "s1", badge: "interrupted", displayTitle: "T" }, { lang: "en" });
+  const perm = fmt.buildPermissionMessage({ toolName: "Bash", agentId: "claude-code" }, { lang: "en" });
+
+  assert.notEqual(colourOf(done), colourOf(bad), "success and failure must not look alike");
+  assert.notEqual(colourOf(done), colourOf(perm), "a request for you is not a completion");
+});
+
+test("permission headers distinguish one request from another at a glance", () => {
+  // Every card used to open with the same generic "Permission needed", so a
+  // channel full of them was unreadable — you had to open each one to see which
+  // agent wanted what. The header is the line people scan.
+  const a = fmt.buildPermissionMessage(
+    { title: "claude-code requests Bash", toolName: "Bash", agentId: "claude-code" }, { lang: "en" });
+  const b = fmt.buildPermissionMessage(
+    { title: "codex requests Write", toolName: "Write", agentId: "codex" }, { lang: "en" });
+
+  assert.notEqual(blocksOf(a)[0].text.text, blocksOf(b)[0].text.text, "headers must differ");
+  assert.ok(blocksOf(a)[0].text.text.includes("Bash"));
+  assert.ok(blocksOf(a)[0].text.text.includes("claude-code"));
+  assert.ok(blocksOf(b)[0].text.text.includes("Write"));
+  // The push preview is the other place people triage from.
+  assert.notEqual(a.text, b.text, "fallback text must differ too");
+});
+
+test("permission message states the tool and agent once, not three times", () => {
+  const msg = fmt.buildPermissionMessage(
+    { title: "claude-code requests Bash", toolName: "Bash", agentId: "claude-code",
+      folder: "clawd-on-desk", summary: "Remove the dist directory" },
+    { lang: "en" },
+  );
+  const body = JSON.stringify(blocksOf(msg));
+  assert.equal((body.match(/Bash/g) || []).length, 1, "tool name should appear once");
+  assert.equal((body.match(/claude-code/g) || []).length, 1, "agent should appear once");
+  // The description is the reason a human is being interrupted — keep it.
+  assert.ok(body.includes("Remove the dist directory"));
+  assert.ok(body.includes("clawd-on-desk"));
 });

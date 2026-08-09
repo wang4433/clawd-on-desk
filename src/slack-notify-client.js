@@ -46,6 +46,34 @@ function classifyHttpStatus(status) {
   return `http-${status}`;
 }
 
+// Cards ship as a coloured attachment so Slack frames each message. Note that
+// top-level `text` is NOT a silent fallback once attachments are present —
+// Slack renders it as the message body above the attachment, so sending both
+// shows the title twice. The plain-text summary that drives notifications goes
+// in the attachment's `fallback` instead.
+//
+// `fallback` is documented as plain text, but a probe against a real workspace
+// showed Slack still parses control sequences there (a <url|label> arrived
+// clickable), so it keeps the escaped string: mention syntax in a session title
+// must not survive into the notification either.
+//
+// A caller may still build an unframed message; blocks then own the render and
+// top-level text goes back to being a true fallback.
+function toWireBody(message) {
+  const body = {};
+  if (Array.isArray(message.attachments)) {
+    body.attachments = message.attachments.map((attachment, i) => (
+      i === 0 && message.text && !attachment.fallback
+        ? { ...attachment, fallback: message.text }
+        : attachment
+    ));
+  } else if (message.text) {
+    body.text = message.text;
+  }
+  if (Array.isArray(message.blocks)) body.blocks = message.blocks;
+  return body;
+}
+
 function createSlackNotifyClient({
   getConfig = () => settings.cloneDefaultSlackNotify(),
   getSecrets = () => ({ webhookUrl: "", botToken: "" }),
@@ -148,7 +176,7 @@ function createSlackNotifyClient({
   // Send a { text, blocks } message via whichever transport the config resolves
   // to. Returns { ok, errorClass?, messageId? } and never throws.
   async function sendMessage(message) {
-    if (!message || (!message.text && !Array.isArray(message.blocks))) {
+    if (!message || (!message.text && !Array.isArray(message.blocks) && !Array.isArray(message.attachments))) {
       return { ok: false, errorClass: "empty-message" };
     }
     const config = readConfig();
@@ -156,11 +184,12 @@ function createSlackNotifyClient({
     const ready = settings.readiness(config, secrets);
     if (!ready.ready) return { ok: false, errorClass: ready.reason || "not-configured" };
 
+    const wire = toWireBody(message);
+
     if (ready.transport === "webhook") {
-      const res = await postJson(secrets.webhookUrl, {}, { text: message.text, blocks: message.blocks });
+      const res = await postJson(secrets.webhookUrl, {}, wire);
       if (res.errorClass) return { ok: false, errorClass: res.errorClass, error: res.error };
       // Incoming webhooks answer 200 with the literal body "ok" on success.
-      if (res.ok && (!res.bodyText || res.bodyText.trim() === "ok")) return { ok: true };
       if (res.ok) return { ok: true };
       return { ok: false, errorClass: classifyHttpStatus(res.status), detail: (res.bodyText || "").slice(0, 200) };
     }
@@ -170,7 +199,7 @@ function createSlackNotifyClient({
     const res = await postJson(
       CHAT_POST_URL,
       { authorization: `Bearer ${secrets.botToken}` },
-      { channel: config.channelId, text: message.text, blocks: message.blocks },
+      { channel: config.channelId, ...wire },
     );
     if (res.errorClass) return { ok: false, errorClass: res.errorClass, error: res.error };
     let parsed = null;

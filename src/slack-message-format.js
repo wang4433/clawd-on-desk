@@ -17,6 +17,20 @@ const SECTION_MAX = 2900;
 const OUTPUT_MAX = 2600;
 const FALLBACK_MAX = 3000;
 
+// Block Kit draws no border, so consecutive cards run together in a busy
+// channel. Wrapping the blocks in an attachment with a `color` gives each
+// message a vertical bar down its left edge — the only framing Slack offers.
+// Attachments are labelled legacy in Slack's docs but remain fully supported,
+// and nothing in Block Kit replaces the colour bar.
+//
+// Slack's own brand palette, so the bars sit naturally in both themes.
+const FRAME = Object.freeze({
+  done: "#2eb67d",         // green
+  interrupted: "#e01e5a",  // red
+  permission: "#ecb22e",   // amber — something is waiting on you
+  info: "#36c5f0",         // blue
+});
+
 const SLACK_LOCALES = Object.freeze({
   en: {
     session: "session",
@@ -284,7 +298,10 @@ function buildCompletionMessage(entry, options = {}) {
     `${icon} ${redactMrkdwn(rawTitle)} ${wrapStatus}${fallbackFolder ? ` — ${fallbackFolder}` : ""}`,
     FALLBACK_MAX
   );
-  return { text: fallback, blocks };
+  return {
+    text: fallback,
+    attachments: [{ color: interrupted ? FRAME.interrupted : FRAME.done, blocks }],
+  };
 }
 
 // Read-only "permission needed" heads-up. Slack cannot resolve the approval in
@@ -292,30 +309,48 @@ function buildCompletionMessage(entry, options = {}) {
 function buildPermissionMessage(payload, options = {}) {
   const locale = getLocale(options.lang);
   const p = payload && typeof payload === "object" ? payload : {};
-  // `title` is built from the agent id + tool name, both agent-controlled.
-  const rawTitle = safeText(p.title).trim() || locale.permissionTitle;
-  const blocks = [headerBlock(`⏳ ${locale.permissionTitle}`)];
+  // The header is what people scan in a busy channel, so it carries the two
+  // things that tell one request apart from another — who is asking and for
+  // what. A generic "Permission needed" on every card makes a scrolling channel
+  // unreadable. Agent and tool appear here and nowhere else; repeating them as
+  // Tool:/Agent: fields below only pushed the actual reason further down.
+  const agentId = redactPlain(p.agentId).trim();
+  const toolName = redactPlain(p.toolName).trim();
+  const identity = [agentId, toolName].filter(Boolean).join(" · ");
+  const heading = identity || redactPlain(p.title).trim() || locale.permissionTitle;
+  const blocks = [headerBlock(`⏳ ${heading}`)];
 
-  const lines = [`*${redactMrkdwn(rawTitle)}*`];
-  const fields = [];
-  if (p.toolName) fields.push(`*${escapeMrkdwn(locale.tool)}:* ${redactMrkdwn(p.toolName)}`);
-  if (p.agentId) fields.push(`*${escapeMrkdwn(locale.agent)}:* ${redactMrkdwn(p.agentId)}`);
-  const folder = folderName(p.folder || p.cwd);
-  if (folder) fields.push(`*${escapeMrkdwn(locale.folder)}:* ${redactMrkdwn(folder)}`);
-  if (fields.length) lines.push(fields.join("\n"));
+  // The description is why a human is being interrupted — give it the body to
+  // itself. Fall back to the title when the agent sent no description.
   const detail = safeText(p.detail || p.summary).trim();
-  if (detail) lines.push(redactMrkdwn(detail));
-  blocks.push(sectionBlock(lines.join("\n\n")));
-  blocks.push(contextBlock(`ℹ️ ${escapeMrkdwn(locale.permissionHint)}`));
+  const body = detail || safeText(p.title).trim();
+  if (body) blocks.push(sectionBlock(clipMrkdwn(redactMrkdwn(body), SECTION_MAX)));
 
-  return { text: clipMrkdwn(`⏳ ${locale.permissionTitle}: ${redactMrkdwn(rawTitle)}`, FALLBACK_MAX), blocks };
+  // Folder is orientation, not the decision — it belongs beside the hint rather
+  // than in the body.
+  const folder = folderName(p.folder || p.cwd);
+  const contextParts = [];
+  if (folder) contextParts.push(`📁 ${redactMrkdwn(folder)}`);
+  contextParts.push(`ℹ️ ${escapeMrkdwn(locale.permissionHint)}`);
+  blocks.push(contextBlock(contextParts.join("  ·  ")));
+
+  // Push previews are the other place people triage from, so the fallback has
+  // to distinguish requests too.
+  const fallbackSubject = identity || safeText(p.title).trim();
+  return {
+    text: clipMrkdwn(`⏳ ${escapeMrkdwn(locale.permissionTitle)}: ${redactMrkdwn(fallbackSubject)}`, FALLBACK_MAX),
+    attachments: [{ color: FRAME.permission, blocks }],
+  };
 }
 
 function buildTestMessage(options = {}) {
   const locale = getLocale(options.lang);
   return {
     text: locale.testTitle,
-    blocks: [headerBlock(`🦀 ${locale.testTitle}`), sectionBlock(escapeMrkdwn(locale.testBody))],
+    attachments: [{
+      color: FRAME.info,
+      blocks: [headerBlock(`🦀 ${locale.testTitle}`), sectionBlock(escapeMrkdwn(locale.testBody))],
+    }],
   };
 }
 
@@ -334,4 +369,5 @@ module.exports = {
   HEADER_MAX,
   SECTION_MAX,
   OUTPUT_MAX,
+  FRAME,
 };

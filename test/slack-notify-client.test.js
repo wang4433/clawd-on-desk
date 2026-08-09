@@ -70,7 +70,18 @@ test("sendTest posts a webhook payload and reports ok", async () => {
   assert.equal(res.status, "ok");
   assert.equal(fetchImpl.calls.length, 1);
   assert.equal(fetchImpl.calls[0].url, WEBHOOK);
-  assert.ok(Array.isArray(fetchImpl.calls[0].body.blocks));
+  // The framing attachment has to survive to the wire, or Slack draws no
+  // colour bar and every card runs into the next one.
+  const sent = fetchImpl.calls[0].body;
+  assert.ok(Array.isArray(sent.attachments), "attachments must be forwarded");
+  assert.ok(Array.isArray(sent.attachments[0].blocks));
+  assert.ok(sent.attachments[0].color);
+
+  // Top-level `text` is NOT a silent fallback once attachments are present —
+  // Slack renders it as the message body above the attachment, so sending both
+  // prints the title twice. The summary belongs in the attachment's `fallback`.
+  assert.equal(sent.text, undefined, "top-level text would render as a duplicate title");
+  assert.ok(sent.attachments[0].fallback, "notifications still need a plain-text summary");
 });
 
 test("bot transport posts to chat.postMessage with auth + channel", async () => {

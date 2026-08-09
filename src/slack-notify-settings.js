@@ -157,7 +157,7 @@ function parseEnvText(text) {
 
 function readSecretsEnvFile({ fs, filePath } = {}) {
   if (!fs || !filePath || typeof fs.readFileSync !== "function") {
-    return { webhookUrl: "", botToken: "" };
+    return { webhookUrl: "" };
   }
   let parsed = {};
   try {

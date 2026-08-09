@@ -2193,6 +2193,7 @@
     return helpers.buildSection(t("slackNotifyStep3Title"), rows);
   }
 
+
   function buildSlackPrerequisitesRow() {
     const row = document.createElement("div");
     row.className = "row tg-approval-prereq-row";
